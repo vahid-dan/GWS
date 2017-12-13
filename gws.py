@@ -8,6 +8,7 @@ from distutils.dir_util import copy_tree
 from celery import Celery
 from pymongo import MongoClient
 from gwsconfig import gwsconf
+from bson.json_util import dumps
 
 # global variables and paths
 base_working_path = gwsconf['base_working_path']
@@ -30,7 +31,6 @@ db_client = MongoClient(connect = False) # running at default port
 db = db_client[gwsconf['graple_db_name']]
 collection = db[gwsconf['graple_coll_name']]
 apicoll = db[gwsconf['api_coll_name']]
-
 
 # mongodb document
 # { 'key': the uid of the experiment 
@@ -64,6 +64,20 @@ def doTask(task, rscript = None):
             'generate_special_job':generate_special_job }
     if task[0] in func_dict:
         func_dict[task[0]](task, rscript)
+
+def api_keygen(size = 64, chars = string.ascii_uppercase + string.digits):
+    random.seed()
+    bid = ''.join(random.choice(chars) for _ in range(size))
+    while apicoll.find_one({'key': bid}) != None:
+        bid = ''.join(random.choice(chars) for _ in range(size))
+    return bid
+
+def classid_gen(size = 6, chars = string.ascii_uppercase + string.digits):
+    random.seed()
+    bid = ''.join(random.choice(chars) for _ in range(size))
+    while apicoll.find_one({'class': { '$all': [bid] }}) != None:
+        bid = ''.join(random.choice(chars) for _ in range(size))
+    return bid
     
 def batch_id_generator(size = 40, chars = string.ascii_uppercase + string.digits):
     bid = ''.join(random.choice(chars) for _ in range(size))
@@ -320,8 +334,16 @@ def check_request():
             response['warnings'] += 'No API key provided \n'
         if apicoll.find_one({'key' : apikey}) == None:
             response['errors'] += 'Invalid API key \n'
+    if 'classid' in request.form:
+        classid = request.form['classid']
+        if apicoll.find_one({'class': { '$all': [classid] }}) == None:
+            response['errors'] += 'Invalid class ID \n'
     else:
-        response['errors'] += 'No API key provided \n'
+        classid = ''
+    if 'username' in request.form:
+        username = request.form['username']
+    else:
+        username = ''
     if 'filter' in request.form:
         filtername = request.form['filter'] + '.R'
         if not os.path.isdir(base_filter_path) or not filtername in os.listdir(base_filter_path):
@@ -354,12 +376,95 @@ def check_request():
             found = apicoll.find_one({'key' : apikey})
             if found != None and 'email' in found:
                 email = found['email']
-    return response, apikey, filtername, sims_per_job, retention, expname, email
+    return response, apikey, filtername, sims_per_job, retention, expname, email, classid, username
+
+@app.route('/GrapleAddUser', methods= ['POST'])
+def create_api_key():
+    email = ''
+    name = ''
+    response = {'errors':'', 'warnings':''}
+    if 'email' in request.form:
+        if len(request.form['email']) != 0:
+            email = str(request.form['email'])[:50]
+            if apicoll.find_one({'email':email}) != None:
+                response['errors'] += 'Email id already exists! \n'
+                return jsonify(response)
+
+    if 'username' in request.form:
+        if len(request.form['username']) != 0:
+            name = str(request.form['username'])[:50]
+    apikey = api_keygen()
+    insdoc = {'key': apikey,'name':name, 'email':email, 'tz':'US/Eastern', 'debug':False, 'role': 0}
+    print "Inserted at ID:", apicoll.insert_one(insdoc).inserted_id
+    response['apikey'] = apikey
+    return jsonify(response) 
+
+@app.route('/GrapleCreateClass', methods= ['POST'])
+def create_new_class():
+    response = {'errors':'', 'warnings':''}
+    print("Inside the method")
+    if ('apikey' in request.form) and len(request.form['apikey']) != 0:
+    #email = request.form['email']
+        apikey = request.form['apikey']
+        if 'email' in request.form and len(request.form['email']) != 0:
+        email = request.form['email']
+        if apicoll.find({'email': email, 'key': apikey, 'role': {"$in": [1, 2]}}) != None :
+                classid = classid_gen()
+                apicoll.update_one({'email': email, 'key': apikey}, { "$push" : { "class" :  classid }})
+                response['classid'] = classid
+                return jsonify(response)
+
+    response['errors'] = "Invalid EmailId/Key combination or you don't have the permission"       
+    return jsonify(response)
+
+@app.route('/GetClassExperiments', methods= ['POST'])
+def get_experiments_of_class():
+    response = {'errors':'', 'warnings':''}
+    if 'classid' in request.form and 'apikey' in request.form:
+        if len(request.form['classid']) != 0 and len(request.form['apikey']) != 0 :
+            classid = str(request.form['classid'])
+            apikey = str(request.form['apikey'])
+            if apicoll.find_one({'classid': classid, 'key': apikey}) != None :
+                query = {'classid': classid}
+                dbdoc = collection.find(query)
+                if dbdoc == None:
+                    response['errors'] += 'ClassId ' + classid + ' not found in database'
+                else:
+                    return dumps(dbdoc)
+        else:
+            response['errors'] += 'ClassID/APIkey is invalid!'
+    
+    return jsonify(response)
+
+@app.route('/GetAPIExperiments', methods= ['POST'])
+def get_experiments_of_apikey():
+    response = {'errors':'', 'warnings':''}
+    if 'apikey' in request.form:
+        if len(request.form['apikey']) != 0 :
+            apikey = str(request.form['apikey'])
+        print(apikey)
+            if apicoll.find_one({'key': apikey}) != None :
+        print("Found a valid api key!")                
+                query = {'apikey':apikey}
+                if 'count' in request.form and len(request.form['count']) != 0 :
+                    count = int(request.form['count'])
+                    dbdoc = collection.find(query).sort({'$natural':-1}).limit(count)
+                else:
+                    print("FOund experiments with the given API key")
+            dbdoc = collection.find(query)
+                if dbdoc == None:
+                    response['errors'] += 'No experiments with this APIKey!'
+                else:
+                    return dumps(dbdoc) 
+        else:
+            response['errors'] += 'APIkey is invalid!'
+    
+    return jsonify(response)
 
 @app.route('/GrapleRun', methods= ['POST'])
 def batch_job():
     global base_upload_path
-    response, apikey, filtername, sims_per_job, retention, expname, email = check_request()
+    response, apikey, filtername, sims_per_job, retention, expname, email, classid, username = check_request()
     if len(response['errors']) > 0:
         return jsonify(response)
 
@@ -370,14 +475,14 @@ def batch_job():
     os.mkdir(exp_root_path)
     f.save(os.path.join(exp_root_path, filename))
     task_desc = ['handle_batch_job', exp_root_path, filename, sims_per_job]
-    collection.insert_one({'key':response['uid'], 'submitted':datetime.datetime.now(), 'status':1, 'progress':0.0, 'retention':retention, 'expname':expname, 'email':email, 'apikey':apikey})
+    collection.insert_one({'key':response['uid'], 'submitted':datetime.datetime.now(), 'status':1, 'progress':0.0, 'retention':retention, 'expname':expname, 'email':email, 'apikey':apikey, 'classid':classid})
     doTask.delay(task_desc, filtername)
     return jsonify(response)
 
 @app.route('/GrapleRunLinearSweep', methods= ['POST'])
 def linear_sweep():
     global base_upload_path
-    response, apikey, filtername, sims_per_job, retention, expname, email = check_request()
+    response, apikey, filtername, sims_per_job, retention, expname, email, classid, username = check_request()
     if len(response['errors']) > 0:
         return jsonify(response)
 
@@ -398,7 +503,7 @@ def linear_sweep():
 @app.route('/GrapleRunMetSample', methods= ['POST'])
 def special_batch():
     global base_upload_path
-    response, apikey, filtername, sims_per_job, retention, expname, email = check_request()
+    response, apikey, filtername, sims_per_job, retention, expname, email, classid, username = check_request()
     if len(response['errors']) > 0: 
         return jsonify(response)
 

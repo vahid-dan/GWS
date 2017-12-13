@@ -9,7 +9,7 @@ gwsconf = {
     'smtp_user' : 'example',
     'smtp_pass' : 'example',
     'base_working_path' : '/home/grapleadmin/grapleService',
-    'serv_addr' : 'http://graple.acis.ufl.edu',
+    'serv_addr' : 'https://graple.acis.ufl.edu',
     'download_endpoint' : '/DownloadResults/',
     'retention_unit' : datetime.timedelta(days = 1),
     'retention_after_dl' : datetime.timedelta(hours = 1),
