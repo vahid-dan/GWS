@@ -337,7 +337,8 @@ def check_request():
     if 'classid' in request.form:
         classid = request.form['classid']
         if apicoll.find_one({'class': { '$all': [classid] }}) == None:
-            response['errors'] += 'Invalid class ID \n'
+            response['warnings'] += 'Invalid class ID or no class ID provided \n'
+            classkey = '0'
     else:
         classid = ''
     if 'username' in request.form:
